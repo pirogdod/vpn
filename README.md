@@ -58,7 +58,7 @@
 - сохраняет последний успешно загруженный список доменов;
 - устанавливает `https-dns-proxy`;
 - переводит DNS OpenWrt на DNS-over-HTTPS;
-- использует Cloudflare и Google как DoH upstream;
+- использует Cloudflare (`1.1.1.1`) и Google (`8.8.8.8`) как DoH upstream;
 - использует Quad9 (`9.9.9.9`, `9.9.9.10`) как bootstrap DNS;
 - включает необходимые сервисы в автозапуск;
 - предоставляет встроенную проверку состояния конфигурации.
@@ -542,15 +542,26 @@ VPN_IPS="
 https-dns-proxy
 ```
 
-По умолчанию используются два DoH resolver:
+По умолчанию используются два DoH resolver с **прямыми сервисными IP**:
 
 ```text
 Cloudflare
-https://cloudflare-dns.com/dns-query
+https://1.1.1.1/dns-query
 
 Google
-https://dns.google/dns-query
+https://8.8.8.8/dns-query
 ```
+
+Имена `cloudflare-dns.com` и `dns.google` намеренно не используются в resolver URL.
+
+Причина: на практике возможна ситуация, когда hostname DoH-сервиса резолвится в CDN-адреса, до которых TLS-соединение нестабильно или таймаутится, хотя специализированные сервисные IP самого DNS-провайдера доступны нормально.
+
+Использование прямых IP:
+
+- убирает лишнюю зависимость от bootstrap-резолва имени DoH endpoint;
+- исключает выбор проблемного CDN IP;
+- упрощает диагностику;
+- делает старт DNS после reboot более предсказуемым.
 
 Локально они слушают примерно:
 
@@ -592,7 +603,7 @@ UDP/TCP 53
 DOH_BOOTSTRAP="9.9.9.9,9.9.9.10"
 ```
 
-Bootstrap используется только для первоначального разрешения имени DoH endpoint. Основные DNS-запросы идут через HTTPS.
+Bootstrap сохраняется в конфигурации `https-dns-proxy` как совместимый fallback-механизм, но при использовании прямых DoH URL вида `https://1.1.1.1/dns-query` и `https://8.8.8.8/dns-query` он уже не нужен для разрешения имени основного DoH endpoint.
 
 ---
 
@@ -743,10 +754,14 @@ tcpdump -ni pppoe-wan 'port 53'
 DoH можно увидеть как HTTPS:
 
 ```sh
-tcpdump -ni pppoe-wan 'host 8.8.8.8 and port 443'
+tcpdump -ni pppoe-wan 'host 1.1.1.1 and port 443'
 ```
 
-или аналогичным фильтром для используемого resolver.
+или:
+
+```sh
+tcpdump -ni pppoe-wan 'host 8.8.8.8 and port 443'
+```
 
 ---
 
@@ -814,6 +829,50 @@ nslookup problematic.example 127.0.0.1
 ```sh
 logread -e https-dns-proxy
 ```
+
+---
+
+## DNS внезапно перестал работать, а VPN на клиенте помогает
+
+Если:
+
+- браузер показывает `DNS_PROBE_STARTED` / `DNS_PROBE_FINISHED_NXDOMAIN`;
+- `dnsmasq` запущен;
+- `https-dns-proxy` запущен;
+- обычный HTTPS с роутера работает;
+- при включении VPN на клиенте сайты начинают открываться,
+
+проверить DoH endpoint напрямую:
+
+```sh
+curl -I --connect-timeout 5 https://1.1.1.1/dns-query
+```
+
+и:
+
+```sh
+curl -I --connect-timeout 5 https://8.8.8.8/dns-query
+```
+
+Ответ `HTTP 400` или `HTTP 415` в этом тесте допустим: главное, что TCP/TLS-соединение установилось и сервер ответил.
+
+Также проверить фактические параметры процессов:
+
+```sh
+for p in $(pidof https-dns-proxy); do
+    tr '\0' ' ' < /proc/$p/cmdline
+    echo
+done
+```
+
+Ожидаются resolver URL:
+
+```text
+https://1.1.1.1/dns-query
+https://8.8.8.8/dns-query
+```
+
+Если вместо них используются hostname-варианты, рекомендуется заменить их на прямые сервисные IP.
 
 ---
 
@@ -1033,3 +1092,20 @@ Russia/inside-dnsmasq-nfset.lst
 - возможность восстановить `/etc/config/network`, `/etc/config/firewall` и `/etc/config/dhcp`.
 
 Скрипт сам создаёт backup перед изменениями, но полноценный системный backup OpenWrt всё равно рекомендуется.
+
+
+---
+
+# Changelog
+
+## v1.1
+
+- DoH resolver URL переведены с hostname на прямые сервисные IP:
+  - Cloudflare: `https://1.1.1.1/dns-query`
+  - Google: `https://8.8.8.8/dns-query`
+- устранена зависимость основного DoH-трафика от bootstrap-резолва имени endpoint;
+- добавлена диагностика ситуации, когда DNS на роутере перестаёт работать, но интернет через клиентский VPN остаётся доступен.
+
+## v1.0
+
+- первоначальная версия selective routing через `sing-box`, `dnsmasq-full`, `nftset`, policy routing и `https-dns-proxy`.
